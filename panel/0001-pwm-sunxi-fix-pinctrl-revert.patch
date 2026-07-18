@@ -1,0 +1,40 @@
+From: PWM Backlight Fix
+Subject: [PATCH] pwm: sunxi: fix pinctrl being reverted after pin_set_state
+
+The function sunxi_pwm_pin_set_state() calls devm_pinctrl_get(), selects
+the requested state, then immediately calls devm_pinctrl_put(). This
+causes the pinctrl reference count to drop to zero, which triggers
+pinmux_disable_setting() and reverts the hardware mux register back to
+gpio_in.
+
+This bug is invisible for PWM channels enabled in the board DTS at boot
+(like pwm0_4, pwm1_6, pwm1_8, pwm1_9), because those platform devices
+have matching drivers that call pinctrl_bind_pins() at probe time,
+maintaining an extra reference.
+
+However, for PWM channels enabled dynamically via DT overlay (like
+pwm1_7), the child platform device (e.g., compatible="allwinner,sunxi-pwm17")
+has no matching driver, so pinctrl_bind_pins() is never called. The
+pinctrl reference obtained by sunxi_pwm_pin_set_state() is the only
+reference, and devm_pinctrl_put() releases it, reverting the mux.
+
+Fix by removing the explicit devm_pinctrl_put(). The devm-managed
+pinctrl handle is properly released when the device is destroyed.
+
+Signed-off-by: PWM Backlight Fix
+---
+ bsp/drivers/pwm/pwm-sunxi.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/bsp/drivers/pwm/pwm-sunxi.c b/bsp/drivers/pwm/pwm-sunxi.c
+index xxxxxxx..xxxxxxx 100644
+--- a/bsp/drivers/pwm/pwm-sunxi.c
++++ b/bsp/drivers/pwm/pwm-sunxi.c
+@@ -544,7 +544,6 @@ static int sunxi_pwm_pin_set_state(struct device *dev, char *name)
+ 	}
+
+ exit:
+-	devm_pinctrl_put(pctl);
+ 	return err;
+
+ }
