@@ -26,6 +26,7 @@
 /dts-v1/;
 /plugin/;
 #include <dt-bindings/gpio/gpio.h>
+
 / {
 	metadata {
 		title = "Enable MIPI DBI SPI Panel on SPI1";
@@ -33,11 +34,10 @@
 		category = "display";
 		exclusive = "spi1", "PD10", "PD11", "PD12", "PD13", "PB4", "PB8", "PJ25";
 		description = "Enable MIPI DBI SPI panel on SPI1.
-MOSI=PD11(pin19) CLK=PD12(pin23) MISO=PD13(pin21) CS=PD10(pin24)
-DC=PB4(pin36) RST=PB8(pin37) BL=PJ25(pin18,pwm1_7).
-
-Firmware: /lib/firmware/panel-mipi-dbi-spi.bin
-Load: sudo modprobe panel-mipi-dbi";
+			       	MOSI=PD11(pin19) CLK=PD12(pin23) MISO=PD13(pin21) CS=PD10(pin24)
+			       	DC=PB4(pin36) RST=PB8(pin37) BL=PJ25(pin18,pwm1_7).
+			       	Firmware: /lib/firmware/panel-mipi-dbi-spi.bin
+				Load: sudo modprobe panel-mipi-dbi";
 	};
 };
 
