@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: (GPL-2.0+ or MIT)
+// Overlay: ES8311 audio on I2S0
+//
+// Uses ES8311 driver (sound/soc/codecs/es8311).
+// Note that this module was first contributed in 6.11
+// we need to backport it back to 6.6
+
+/*
+ * Wiring (example on Radxa Cubie A7Z)
+ *  Codec         40Pin
+ *  I2S_MCLK ---- PB4  (pin 36)
+ *  I2S_BCLK ---- PB5  (pin 12)
+ *  I2S_LRCLK --- PB6  (pin 35)
+ *  I2S_DOUT ---- PB7  (pin 40)
+ *  I2S_DIN  ---- PB8  (pin 38)
+ *  I2C_SDA  ---- PJ23 (pin 3) TWI7_SDA
+ *  I2C_SCL  ---- PJ22 (pin 5) TWI7_SCK
+ *  PA       ---- PM4 (pin 37)
+ *  3.3V     ---- pin 1 or pin 17
+ *  GND      ---- Pin 39
+ *
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	metadata {
+		title = "Enable ES8311 sound card on I2S0";
+		compatible = "radxa,cubie-a7a", "radxa,cubie-a7z", "radxa,cubie-a7s";
+		category = "misc";
+		exclusive = "i2s0", "PB4", "PB5", "PB6", "PB7", "PB8", "PJ23", "PJ22";
+		description = "Enable ES8111 codec on I2S0";
+	};
+};
+
+/* I2S0, TWI7 pinmux */
+&pio {
+	i2s0_pins_mclk: i2s0@0 {
+		pins = "PB4";
+		function = "i2s0_mclk";
+		allwinner,drive = <1>;
+		bias-disable;
+	};
+
+	i2s0_pins_bclk: i2s0@1 {
+		pins = "PB5";
+		function = "i2s0_bclk";
+		allwinner,drive = <1>;
+		bias-disable;
+	};
+
+	i2s0_pins_lrclk: i2s0@2 {
+		pins = "PB6";
+		function = "i2s0_lrclk";
+		allwinner,drive = <1>;
+		bias-pull-down;
+	};
+
+	i2s0_pins_din: i2s0@3 {
+		pins = "PB8";
+		function = "i2s0_din0";
+		allwinner,drive = <1>;
+		bias-pull-down;
+	};
+
+	i2s0_pins_dout: i2s0@4 {
+		pins = "PB7";
+		function = "i2s0_dout0";
+		allwinner,drive = <1>;
+		bias-pull-down;
+	};
+
+	i2s0_pins_all: i2s0@5 {
+		pins = "PB4", "PB5", "PB6", "PB7", "PB8";
+		function = "io_disabled";
+		allwinner,drive = <1>;
+		bias-disable;
+	};
+
+	twi7_pins_default: twi7@0 {
+		pins = "PJ22", "PJ23";
+		function = "twi7";
+		drive-strength = <10>;
+		bias-pull-up;
+	};
+
+	twi7_pins_sleep: twi7@1 {
+		pins = "PJ22", "PJ23";
+		function = "gpio_in";
+	};
+};
+
+&twi7 {
+	clock-frequency = <400000>;
+	pinctrl-0 = <&twi7_pins_default>;
+	pinctrl-1 = <&twi7_pins_sleep>;
+	pinctrl-names = "default", "sleep";
+	/* Set twi_drv_used for backwards compatibility */
+	twi_drv_used = <1>;
+	status = "okay";
+
+	es8311_codec: codec@18 {
+		compatible = "everest,es8311";
+		reg = <0x18>;
+		clocks = <&clk 10>;
+		clock-names = "mclk";
+		#sound-dai-cells = <0>;
+	};
+};
+
+&i2s0_plat {
+	tdm-num = <0>;
+	tx-pin = <0>;
+	rx-pin = <0>;
+
+	tx-hub-en;
+	rx-hub-en;
+
+	pinctrl-used;
+	pinctrl-names = "default", "active";
+	pinctrl-0 = <&i2s0_pins_mclk
+		     &i2s0_pins_bclk
+		     &i2s0_pins_lrclk
+		     &i2s0_pins_din
+		     &i2s0_pins_dout>;
+
+	pinctrl-1 = <&i2s0_pins_all>;
+
+	status = "okay";
+};
+
+&i2s0_mach {
+	soundcard-mach,format = "i2s";
+	soundcard-mach,frame-master = <&i2s0_cpu>;
+	soundcard-mach,bitclock-master = <&i2s0_cpu>;
+	/* soundcard-mach,frame-inversion; */
+	/* soundcard-mach,bitclock-inversion; */
+	soundcard-mach,slot-num = <2>;
+	soundcard-mach,slot-width = <32>;
+	status = "okay";
+
+	i2s0_cpu: soundcard-mach,cpu {
+		sound-dai = <&i2s0_plat>;
+		soundcard-mach,pll-fs = <1>;
+		soundcard-mach,mclk-fs = <256>;
+	};
+
+	i2s_codec: soundcard-mach,codec {
+		sound-dai = <&es8311_codec>;
+	};
+};
