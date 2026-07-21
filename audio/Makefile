@@ -12,7 +12,7 @@ DTC ?= dtc
 DTC_FLAGS ?= -@
 
 DTS := sun60i-a733-es8311-audio.dtso
-DTBO := $(DTS:.dts=.dtbo)
+DTBO := $(DTS:.dtso=.dtbo)
 
 .PHONY: all module overlay check-overlay clean help check-kdir
 

@@ -50,9 +50,9 @@
 		bias-disable;
 	};
 
-	i2s0_pins_lrclk: i2s0@2 {
+	i2s0_pins_lrck: i2s0@2 {
 		pins = "PB6";
-		function = "i2s0_lrclk";
+		function = "i2s0_lrck";
 		allwinner,drive = <1>;
 		bias-pull-down;
 	};
@@ -116,10 +116,10 @@
 	rx-hub-en;
 
 	pinctrl-used;
-	pinctrl-names = "default", "active";
+	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&i2s0_pins_mclk
 		     &i2s0_pins_bclk
-		     &i2s0_pins_lrclk
+		     &i2s0_pins_lrck
 		     &i2s0_pins_din
 		     &i2s0_pins_dout>;
 
