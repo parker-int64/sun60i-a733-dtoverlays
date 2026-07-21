@@ -103,8 +103,6 @@
 	es8311_codec: codec@18 {
 		compatible = "everest,es8311";
 		reg = <0x18>;
-		clocks = <&clk 10>;
-		clock-names = "mclk";
 		#sound-dai-cells = <0>;
 	};
 };
