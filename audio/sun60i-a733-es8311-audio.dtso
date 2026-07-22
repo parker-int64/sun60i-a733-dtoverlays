@@ -29,7 +29,7 @@
 		title = "Enable ES8311 sound card on I2S0";
 		compatible = "radxa,cubie-a7a", "radxa,cubie-a7z", "radxa,cubie-a7s";
 		category = "misc";
-		exclusive = "i2s0", "PB4", "PB5", "PB6", "PB7", "PB8", "PJ23", "PJ22";
+		exclusive = "i2s0", "PB4", "PB5", "PB6", "PB7", "PB8", "PJ23", "PJ22", "PM4";
 		description = "Enable ES8111 codec on I2S0";
 	};
 };
@@ -115,6 +115,12 @@
 	tx-hub-en;
 	rx-hub-en;
 
+	pa-pin-max = <1>;
+	pa-pin-0 = <&r_pio 1 4 0>; /* PM4, active high */
+	pa-pin-level-0 = <1>;
+	pa-pin-msleep-0 = <10>;
+	pa-pin-msleep1-0 = <0>;
+
 	pinctrl-used;
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&i2s0_pins_mclk
@@ -136,6 +142,7 @@
 	/* soundcard-mach,bitclock-inversion; */
 	soundcard-mach,slot-num = <2>;
 	soundcard-mach,slot-width = <32>;
+	soundcard-mach,routing = "SPK", "OUT";
 	status = "okay";
 
 	i2s0_cpu: soundcard-mach,cpu {
