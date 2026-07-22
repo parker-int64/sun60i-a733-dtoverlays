@@ -7,7 +7,7 @@
  * Author: Matteo Martelli <matteomartelli3@gmail.com>
  */
 
-#include "linux/array_size.h"
+#include <linux/kernel.h>
 #include "sound/pcm.h"
 #include <linux/clk.h>
 #include <linux/i2c.h>
@@ -456,10 +456,9 @@ static int es8311_mute(struct snd_soc_dai *dai, int mute, int direction)
 		unsigned int mask = ES8311_DAC1_DAC_DSMMUTE |
 				    ES8311_DAC1_DAC_DEMMUTE;
 		unsigned int val = mute ? mask : 0;
-
+        
 		regmap_update_bits(es8311->regmap, ES8311_DAC1, mask, val);
 	}
-
 	return 0;
 }
 
@@ -797,7 +796,7 @@ static int es8311_set_bias_level(struct snd_soc_component *component,
 static const struct snd_soc_dai_ops es8311_dai_ops = {
 	.startup = es8311_startup,
 	.hw_params = es8311_hw_params,
-	.mute_stream = es8311_mute,
+	.mute_stream  = es8311_mute,
 	.set_sysclk = es8311_set_sysclk,
 	.set_fmt = es8311_set_dai_fmt,
 	.no_capture_mute = 1,
