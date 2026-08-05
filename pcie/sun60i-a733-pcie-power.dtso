@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: (GPL-2.0+ or MIT)
+// Overlay: Enable the Cubie A7Z PCIe FPC power signal
+//
+// The PCIe FPC POWER-EN signal is connected to PD20. The vendor PCIe
+// driver requests it through the power-gpios property before link training.
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	metadata {
+		title = "Enable Cubie A7Z PCIe FPC power";
+		compatible = "radxa,cubie-a7z";
+		category = "misc";
+		exclusive = "pcie", "PD20";
+		description = "Drive PD20 high through the vendor PCIe power-gpios binding to enable the PCIe FPC expansion board power supply.";
+	};
+};
+
+&pcie_rc {
+	/* GPIO flag 0 is active-high. */
+	power-gpios = <&pio 3 20 0>; /* PD20, FPC pin 13 */
+	status = "okay";
+};
