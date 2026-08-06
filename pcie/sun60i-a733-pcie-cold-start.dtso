@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: (GPL-2.0+ or MIT)
+// Overlay: Power-sequence the Cubie A7Z PCIe FPC expansion board
+//
+// Model POWER-EN (PD20) as the enable GPIO of the PCIe 3.3 V supply.
+// The regulator startup delay is observed by the PCIe driver before it
+// resets the endpoint and starts link training.
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	metadata {
+		title = "Power-sequence Cubie A7Z PCIe FPC";
+		compatible = "radxa,cubie-a7z";
+		category = "misc";
+		exclusive = "pcie", "PD20", "PD21", "PD22";
+		description = "Enable the PCIe FPC 3.3 V rail through PD20 and wait 500 ms before endpoint reset and link training.";
+	};
+};
+
+&{/} {
+	pcie_fpc_3v3: regulator-pcie-fpc-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "pcie-fpc-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&pio 3 20 0>; /* PD20, FPC pin 13: POWER-EN */
+		enable-active-high;
+		startup-delay-us = <500000>;
+		off-on-delay-us = <100000>;
+		vin-supply = <&reg_dcdc1>;
+	};
+};
+
+&pcie_rc {
+	reset-gpios = <&pio 3 22 0>; /* PD22: PERST# */
+	wake-gpios = <&pio 3 21 0>;  /* PD21: WAKE# */
+	pcie1v8-supply = <&reg_bldo1>;
+	pcie3v3-supply = <&pcie_fpc_3v3>;
+	status = "okay";
+};
