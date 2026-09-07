@@ -30,6 +30,16 @@ static const u8 panel_mipi_dbi_magic[15] = { 'M', 'I', 'P', 'I', ' ', 'D', 'B', 
 					     0, 0, 0, 0, 0, 0, 0 };
 
 /*
+ * The vendor sunxi DRM stack has its own fbdev and console ownership.
+ * Keep this standalone DRM device from creating another fb device by
+ * default; users that explicitly need fbdev emulation can opt in with
+ * panel_mipi_dbi.fbdev=1.
+ */
+static bool panel_mipi_dbi_fbdev;
+module_param_named(fbdev, panel_mipi_dbi_fbdev, bool, 0644);
+MODULE_PARM_DESC(fbdev, "Enable generic fbdev emulation (default: false)");
+
+/*
  * The display controller configuration is stored in a firmware file.
  * The Device Tree 'compatible' property value with a '.bin' suffix is passed
  * to request_firmware() to fetch this file.
@@ -335,7 +345,8 @@ static int panel_mipi_dbi_spi_probe(struct spi_device *spi)
 
 	spi_set_drvdata(spi, drm);
 
-	drm_fbdev_generic_setup(drm, 0);
+	if (panel_mipi_dbi_fbdev)
+		drm_fbdev_generic_setup(drm, 0);
 
 	return 0;
 }
