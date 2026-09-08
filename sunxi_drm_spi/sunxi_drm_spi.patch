@@ -1,0 +1,1607 @@
+diff --git a/bsp/drivers/drm/Kconfig b/bsp/drivers/drm/Kconfig
+index 148c8386bfcf..30c2b4b5939f 100644
+--- a/bsp/drivers/drm/Kconfig
++++ b/bsp/drivers/drm/Kconfig
+@@ -83,6 +83,17 @@ config AW_DRM_DSI
+ 	help
+ 		If you want lcd-dsi output for drm driver, select it.
+ 
++config AW_DRM_SPI
++	bool "Support SPI/DBI output"
++	depends on AW_DRM
++	depends on SPI
++	select DRM_MIPI_DBI
++	default n
++	help
++		Add an SPI/DBI connector to the vendor sunxi DRM master. The
++		Display Engine still owns composition; the connector copies the
++		committed primary framebuffer and sends it through SPI.
++
+ config AW_DRM_HDMI_TX
+ 	tristate "Support Hdmi Output"
+ 	depends on AW_DRM
+diff --git a/bsp/drivers/drm/Makefile b/bsp/drivers/drm/Makefile
+index 2be053149212..deacf411f77f 100644
+--- a/bsp/drivers/drm/Makefile
++++ b/bsp/drivers/drm/Makefile
+@@ -35,6 +35,9 @@ sunxidrm-$(CONFIG_AW_DRM_TCON_TOP) += sunxi_device/sunxi_tcon_top.o
+ sunxidrm-$(CONFIG_AW_DRM_DSI) += sunxi_drm_dsi.o \
+ 				 sunxi_device/hardware/lowlevel_lcd/dsi_v1.o
+ 
++# SPI/DBI output
++sunxidrm-$(CONFIG_AW_DRM_SPI) += sunxi_drm_spi.o
++
+ # lvds
+ sunxidrm-$(CONFIG_AW_DRM_LVDS) += sunxi_drm_lvds.o
+ 
+diff --git a/bsp/drivers/drm/sunxi_drm_crtc.c b/bsp/drivers/drm/sunxi_drm_crtc.c
+index a9c0562ae38a..8a5d563e0b3e 100644
+--- a/bsp/drivers/drm/sunxi_drm_crtc.c
++++ b/bsp/drivers/drm/sunxi_drm_crtc.c
+@@ -2097,6 +2097,9 @@ static void sunxi_crtc_atomic_flush(struct drm_crtc *crtc,
+ 
+ 	backend_data = scrtc_state->backend_blob ? scrtc_state->backend_blob->data : NULL;
+ 	sunxi_de_atomic_flush(scrtc->sunxi_de, backend_data, &cfg);
++	if (scrtc_state->atomic_flush_state)
++		scrtc_state->atomic_flush_state(scrtc_state->output_dev_data,
++						 new_state);
+ 	if (scrtc_state->atomic_flush)
+ 		scrtc_state->atomic_flush(scrtc_state->output_dev_data);
+ 
+diff --git a/bsp/drivers/drm/sunxi_drm_crtc.h b/bsp/drivers/drm/sunxi_drm_crtc.h
+index bd86bccfe6fb..b9ead1bd64a6 100644
+--- a/bsp/drivers/drm/sunxi_drm_crtc.h
++++ b/bsp/drivers/drm/sunxi_drm_crtc.h
+@@ -21,6 +21,8 @@ typedef bool (*fifo_status_check_callback_t)(void *);
+ typedef bool (*is_sync_time_enough_callback_t)(void *);
+ typedef int (*get_cur_line_callback_t)(void *);
+ typedef void (*connector_atomic_flush)(void *);
++/* Optional output callback which also receives the committed CRTC state. */
++typedef void (*connector_atomic_flush_state)(void *, struct drm_crtc_state *);
+ // backlight
+ typedef bool (*is_support_backlight_callback_t)(void *);
+ typedef void (*set_backlight_value_callback_t)(void *, int);
+@@ -56,6 +58,7 @@ struct sunxi_crtc_state {
+ 	is_sync_time_enough_callback_t is_sync_time_enough;
+ 	get_cur_line_callback_t get_cur_line;
+ 	connector_atomic_flush  atomic_flush;
++	connector_atomic_flush_state atomic_flush_state;
+ 	is_support_backlight_callback_t is_support_backlight;
+ 	set_backlight_value_callback_t set_backlight_value;
+ 	get_backlight_value_callback_t get_backlight_value;
+diff --git a/bsp/drivers/drm/sunxi_drm_drv.c b/bsp/drivers/drm/sunxi_drm_drv.c
+index 466ad9d5c5bd..60d030cb9061 100644
+--- a/bsp/drivers/drm/sunxi_drm_drv.c
++++ b/bsp/drivers/drm/sunxi_drm_drv.c
+@@ -88,6 +88,7 @@ extern struct platform_driver sunxi_drm_edp_platform_driver;
+ extern struct platform_driver sunxi_tcon_platform_driver;
+ extern struct platform_driver sunxi_tcon_top_platform_driver;
+ extern struct platform_driver sunxi_dsi_platform_driver;
++extern struct platform_driver sunxi_spi_platform_driver;
+ extern struct platform_driver sunxi_lvds_platform_driver;
+ extern struct platform_driver sunxi_rgb_platform_driver;
+ extern struct platform_driver sunxi_dsi_combo_phy_platform_driver;
+@@ -439,6 +440,7 @@ static struct platform_driver *sunxi_drm_sub_drivers[] = {
+ 	DRV_PTR(sunxi_de_platform_driver,		CONFIG_AW_DRM_DE),
+ 	DRV_PTR(sunxi_dsi_combo_phy_platform_driver,	CONFIG_AW_DRM_DSI_COMBOPHY),
+ 	DRV_PTR(sunxi_dsi_platform_driver,		CONFIG_AW_DRM_DSI),
++	DRV_PTR(sunxi_spi_platform_driver,		CONFIG_AW_DRM_SPI),
+ 	DRV_PTR(sunxi_lvds_platform_driver,		CONFIG_AW_DRM_LVDS),
+ 	DRV_PTR(sunxi_rgb_platform_driver,		CONFIG_AW_DRM_RGB),
+ 	DRV_PTR(sunxi_hdmi_platform_driver,		CONFIG_AW_DRM_HDMI_TX),
+diff --git a/bsp/drivers/drm/sunxi_drm_spi.c b/bsp/drivers/drm/sunxi_drm_spi.c
+new file mode 100644
+index 000000000000..701eaa6873e2
+--- /dev/null
++++ b/bsp/drivers/drm/sunxi_drm_spi.c
+@@ -0,0 +1,649 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Allwinner vendor DRM SPI/DBI output prototype.
++ *
++ * This driver deliberately lives in the sunxi DRM component graph.  It does
++ * not create a second DRM card or a fbdev device.  The sunxi DE remains the
++ * compositor; after the DE commit this driver copies the committed primary
++ * plane into a DMA-safe RGB565 buffer and sends it through MIPI DBI over SPI.
++ *
++ * The first version supports one primary plane and a full-frame update.  A
++ * later version should use the existing sunxi writeback connector when more
++ * than one plane is active, then send the writeback buffer over SPI.
++ */
++
++#include <linux/backlight.h>
++#include <linux/component.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++#include <linux/regulator/consumer.h>
++#include <linux/spi/spi.h>
++#include <linux/slab.h>
++#include <linux/version.h>
++
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_mipi_dbi.h>
++#include <drm/drm_of.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_print.h>
++#include <drm/drm_simple_kms_helper.h>
++
++#include <video/mipi_display.h>
++
++#include "sunxi_drm_drv.h"
++#include "sunxi_drm_crtc.h"
++
++#define SUNXI_SPI_MAX_PLANES	4
++
++struct sunxi_drm_spi {
++	struct sunxi_drm_device sdrm;
++	struct device *dev;
++	struct spi_device *spi;
++	struct device_node *spi_node;
++	struct device_node *tcon_node;
++	struct mipi_dbi dbi;
++	struct drm_display_mode mode;
++	struct regulator *power;
++	struct regulator *io;
++	struct gpio_desc *reset;
++	struct gpio_desc *dc;
++	struct backlight_device *backlight;
++	u8 *init_sequence;
++	size_t init_sequence_len;
++	u16 *tx_buf;
++	size_t tx_buf_len;
++	u32 tcon_id;
++	bool prepared;
++	struct mutex flush_lock;
++};
++
++static inline struct sunxi_drm_spi *to_sunxi_drm_spi(struct sunxi_drm_device *sdrm)
++{
++	return container_of(sdrm, struct sunxi_drm_spi, sdrm);
++}
++
++static int sunxi_spi_find_device(struct device *dev, const void *data)
++{
++	return dev->of_node == data;
++}
++
++static struct spi_device *sunxi_spi_get_by_node(struct device_node *np)
++{
++	struct device *dev;
++
++	dev = bus_find_device(&spi_bus_type, NULL, np, sunxi_spi_find_device);
++	if (!dev)
++		return NULL;
++
++	return to_spi_device(dev);
++}
++
++static int sunxi_spi_parse_mode(struct sunxi_drm_spi *spi)
++{
++	int ret;
++
++	ret = of_get_drm_panel_display_mode(spi->dev->of_node, &spi->mode, NULL);
++	if (ret) {
++		DRM_DEV_ERROR(spi->dev, "failed to parse panel-timing: %d\n", ret);
++		return ret;
++	}
++
++	spi->mode.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	if (!spi->mode.clock)
++		spi->mode.clock = spi->mode.htotal * spi->mode.vtotal * 60 / 1000;
++
++	if (!spi->mode.hdisplay || !spi->mode.vdisplay) {
++		DRM_DEV_ERROR(spi->dev, "invalid SPI panel mode\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int sunxi_spi_parse_init_sequence(struct sunxi_drm_spi *spi)
++{
++	int count, ret;
++
++	count = of_property_count_elems_of_size(spi->dev->of_node,
++						"init-sequence", sizeof(u8));
++	if (count <= 0) {
++		DRM_DEV_INFO(spi->dev,
++			     "no init-sequence; panel must be preconfigured or use a panel-specific sequence\n");
++		return 0;
++	}
++
++	spi->init_sequence = devm_kmalloc(spi->dev, count, GFP_KERNEL);
++	if (!spi->init_sequence)
++		return -ENOMEM;
++
++	ret = of_property_read_u8_array(spi->dev->of_node, "init-sequence",
++					spi->init_sequence, count);
++	if (ret)
++		return ret;
++
++	spi->init_sequence_len = count;
++	return 0;
++}
++
++static int sunxi_spi_regulator_get(struct sunxi_drm_spi *spi,
++					struct regulator **reg, const char *name)
++{
++	int ret;
++
++	*reg = devm_regulator_get_optional(spi->dev, name);
++	if (IS_ERR(*reg)) {
++		ret = PTR_ERR(*reg);
++		if (ret == -ENODEV) {
++			*reg = NULL;
++			dev_warn(spi->dev, "optional %s supply is absent\n", name);
++			return 0;
++		}
++		return dev_err_probe(spi->dev, ret, "failed to get %s supply\n", name);
++	}
++
++	return 0;
++}
++
++static int sunxi_spi_prepare(struct sunxi_drm_spi *spi)
++{
++	int ret;
++
++	if (spi->prepared)
++		return 0;
++
++	if (spi->power) {
++		ret = regulator_enable(spi->power);
++		if (ret)
++			return ret;
++	}
++	if (spi->io) {
++		ret = regulator_enable(spi->io);
++		if (ret)
++			goto disable_power;
++	}
++
++	if (spi->reset) {
++		gpiod_set_value_cansleep(spi->reset, 1);
++		usleep_range(1000, 2000);
++		gpiod_set_value_cansleep(spi->reset, 0);
++		msleep(20);
++		gpiod_set_value_cansleep(spi->reset, 1);
++		msleep(120);
++	}
++
++	spi->prepared = true;
++	DRM_DEV_INFO(spi->dev, "prepared SPI DBI panel at %u Hz\n",
++			spi->spi->max_speed_hz);
++	return 0;
++
++disable_power:
++	if (spi->power)
++		regulator_disable(spi->power);
++	return ret;
++}
++
++static void sunxi_spi_unprepare(struct sunxi_drm_spi *spi)
++{
++	if (!spi->prepared)
++		return;
++
++	if (spi->io)
++		regulator_disable(spi->io);
++	if (spi->power)
++		regulator_disable(spi->power);
++	spi->prepared = false;
++}
++
++static int sunxi_spi_execute_init_sequence(struct sunxi_drm_spi *spi)
++{
++	size_t pos = 0;
++
++	while (pos < spi->init_sequence_len) {
++		u8 command, count;
++		int ret = 0;
++
++		if (spi->init_sequence_len - pos < 2)
++			return -EINVAL;
++		command = spi->init_sequence[pos++];
++		count = spi->init_sequence[pos++];
++		if (spi->init_sequence_len - pos < count)
++			return -EINVAL;
++
++		if (command == 0 && count == 1)
++			msleep(spi->init_sequence[pos]);
++		else if (count)
++			ret = mipi_dbi_command_stackbuf(&spi->dbi, command,
++						&spi->init_sequence[pos], count);
++		else
++			ret = mipi_dbi_command(&spi->dbi, command);
++
++		if (ret) {
++			DRM_DEV_ERROR(spi->dev, "init command 0x%02x failed: %d\n",
++				      command, ret);
++			return ret;
++		}
++		pos += count;
++	}
++
++	return 0;
++}
++
++static int sunxi_spi_set_window(struct sunxi_drm_spi *spi,
++				unsigned int width, unsigned int height)
++{
++	u8 column[] = { 0, 0, (width - 1) >> 8, (width - 1) & 0xff };
++	u8 page[] = { 0, 0, (height - 1) >> 8, (height - 1) & 0xff };
++	int ret;
++
++	ret = mipi_dbi_command_buf(&spi->dbi, MIPI_DCS_SET_COLUMN_ADDRESS,
++				   column, sizeof(column));
++	if (ret)
++		return ret;
++	return mipi_dbi_command_buf(&spi->dbi, MIPI_DCS_SET_PAGE_ADDRESS,
++				    page, sizeof(page));
++}
++
++static void sunxi_spi_copy_pixel(u16 *dst, u32 pixel, u32 format)
++{
++	u8 r, g, b;
++	u16 value;
++
++	if (format == DRM_FORMAT_RGB565) {
++		value = pixel & 0xffff;
++		*dst = cpu_to_be16(value);
++		return;
++	}
++
++	r = (pixel >> 16) & 0xff;
++	g = (pixel >> 8) & 0xff;
++	b = pixel & 0xff;
++	value = ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3);
++	*dst = cpu_to_be16(value);
++}
++
++static int sunxi_spi_copy_frame(struct sunxi_drm_spi *spi,
++				struct drm_framebuffer *fb,
++				struct iosys_map *src)
++{
++	unsigned int x, y;
++	unsigned int bpp;
++
++	if (fb->format->format != DRM_FORMAT_RGB565 &&
++	    fb->format->format != DRM_FORMAT_XRGB8888 &&
++	    fb->format->format != DRM_FORMAT_ARGB8888) {
++		DRM_DEV_ERROR_RATELIMITED(spi->dev,
++					  "unsupported framebuffer format %p4cc\n",
++					  &fb->format->format);
++		return -EINVAL;
++	}
++
++	bpp = fb->format->cpp[0];
++	for (y = 0; y < fb->height; y++) {
++		for (x = 0; x < fb->width; x++) {
++			u32 pixel;
++
++			if (bpp == 2)
++				pixel = iosys_map_rd(src, y * fb->pitches[0] + x * 2,
++							 u16);
++			else
++				pixel = iosys_map_rd(src, y * fb->pitches[0] + x * 4,
++							 u32);
++			sunxi_spi_copy_pixel(&spi->tx_buf[y * fb->width + x],
++					     pixel, fb->format->format);
++		}
++	}
++
++	return 0;
++}
++
++static struct drm_plane_state *sunxi_spi_find_primary_state(
++				struct drm_crtc_state *crtc_state)
++{
++	struct drm_plane *plane;
++	struct drm_plane_state *fallback = NULL;
++	unsigned int active_planes = 0;
++
++	drm_for_each_plane(plane, crtc_state->state->dev) {
++		struct drm_plane_state *state;
++
++		state = drm_atomic_get_new_plane_state(crtc_state->state, plane);
++		if (!state)
++			state = plane->state;
++		if (!state || state->crtc != crtc_state->crtc || !state->fb)
++			continue;
++		active_planes++;
++		if (plane->type == DRM_PLANE_TYPE_PRIMARY)
++			return state;
++		fallback = state;
++	}
++
++	if (active_planes > 1)
++		dev_warn_ratelimited(crtc_state->crtc->dev->dev,
++					 "SPI prototype only flushes one composed plane; overlays are not flattened\n");
++
++	return fallback;
++}
++
++static void sunxi_spi_atomic_flush_state(void *data,
++					 struct drm_crtc_state *crtc_state)
++{
++	struct sunxi_drm_spi *spi = data;
++	struct drm_plane_state *plane_state;
++	struct drm_framebuffer *fb;
++	struct iosys_map map[SUNXI_SPI_MAX_PLANES];
++	struct iosys_map data_map[SUNXI_SPI_MAX_PLANES];
++	int ret;
++
++	if (!crtc_state->active)
++		return;
++
++	plane_state = sunxi_spi_find_primary_state(crtc_state);
++	if (!plane_state) {
++		dev_warn_ratelimited(spi->dev,
++					 "no framebuffer in committed CRTC state\n");
++		return;
++	}
++	fb = plane_state->fb;
++	if (fb->width != spi->mode.hdisplay || fb->height != spi->mode.vdisplay ||
++	    fb->format->num_planes > SUNXI_SPI_MAX_PLANES ||
++	    (size_t)fb->width * fb->height * sizeof(u16) > spi->tx_buf_len) {
++		dev_warn_ratelimited(spi->dev,
++				     "rejecting framebuffer dimensions/planes unsuitable for SPI\n");
++		return;
++	}
++
++	mutex_lock(&spi->flush_lock);
++	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
++	if (ret)
++		goto out_unlock;
++
++	ret = drm_gem_fb_vmap(fb, map, data_map);
++	if (ret)
++		goto out_cpu;
++
++	ret = sunxi_spi_copy_frame(spi, fb, &data_map[0]);
++	if (!ret)
++		ret = sunxi_spi_set_window(spi, fb->width, fb->height);
++	if (!ret)
++		ret = mipi_dbi_command_buf(&spi->dbi, MIPI_DCS_WRITE_MEMORY_START,
++					   (u8 *)spi->tx_buf,
++					   fb->width * fb->height * sizeof(u16));
++
++	drm_gem_fb_vunmap(fb, map);
++out_cpu:
++	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
++out_unlock:
++	mutex_unlock(&spi->flush_lock);
++
++	if (ret)
++		DRM_DEV_ERROR_RATELIMITED(spi->dev, "frame flush failed: %d\n", ret);
++}
++
++static int sunxi_spi_encoder_atomic_check(struct drm_encoder *encoder,
++						struct drm_crtc_state *crtc_state,
++						struct drm_connector_state *conn_state)
++{
++	struct sunxi_drm_device *sdrm = container_of(encoder,
++							struct sunxi_drm_device, encoder);
++	struct sunxi_drm_spi *spi = to_sunxi_drm_spi(sdrm);
++	struct sunxi_crtc_state *scrtc_state = to_sunxi_crtc_state(crtc_state);
++
++	scrtc_state->tcon_id = spi->tcon_id;
++	scrtc_state->output_dev_data = spi;
++	scrtc_state->atomic_flush = NULL;
++	scrtc_state->atomic_flush_state = sunxi_spi_atomic_flush_state;
++	return 0;
++}
++
++static void sunxi_spi_encoder_atomic_enable(struct drm_encoder *encoder,
++						struct drm_atomic_state *state)
++{
++	struct sunxi_drm_device *sdrm = container_of(encoder,
++							struct sunxi_drm_device, encoder);
++	struct sunxi_drm_spi *spi = to_sunxi_drm_spi(sdrm);
++	int ret;
++
++	ret = sunxi_spi_prepare(spi);
++	if (ret) {
++		DRM_DEV_ERROR(spi->dev, "panel prepare failed: %d\n", ret);
++		return;
++	}
++	ret = sunxi_spi_execute_init_sequence(spi);
++	if (ret)
++		DRM_DEV_ERROR(spi->dev, "panel init sequence failed: %d\n", ret);
++	if (spi->backlight)
++		backlight_enable(spi->backlight);
++}
++
++static void sunxi_spi_encoder_atomic_disable(struct drm_encoder *encoder,
++						 struct drm_atomic_state *state)
++{
++	struct sunxi_drm_device *sdrm = container_of(encoder,
++							struct sunxi_drm_device, encoder);
++	struct sunxi_drm_spi *spi = to_sunxi_drm_spi(sdrm);
++
++	if (spi->backlight)
++		backlight_disable(spi->backlight);
++	mipi_dbi_command(&spi->dbi, MIPI_DCS_SET_DISPLAY_OFF);
++	mipi_dbi_command(&spi->dbi, MIPI_DCS_ENTER_SLEEP_MODE);
++	sunxi_spi_unprepare(spi);
++}
++
++static const struct drm_encoder_helper_funcs sunxi_spi_encoder_helper_funcs = {
++	.atomic_check = sunxi_spi_encoder_atomic_check,
++	.atomic_enable = sunxi_spi_encoder_atomic_enable,
++	.atomic_disable = sunxi_spi_encoder_atomic_disable,
++};
++
++static enum drm_connector_status sunxi_spi_detect(struct drm_connector *connector,
++						bool force)
++{
++	return connector_status_connected;
++}
++
++static int sunxi_spi_get_modes(struct drm_connector *connector)
++{
++	struct sunxi_drm_device *sdrm = container_of(connector,
++							struct sunxi_drm_device, connector);
++	struct sunxi_drm_spi *spi = to_sunxi_drm_spi(sdrm);
++	struct drm_display_mode *mode;
++
++	mode = drm_mode_duplicate(connector->dev, &spi->mode);
++	if (!mode)
++		return 0;
++	drm_mode_probed_add(connector, mode);
++	return 1;
++}
++
++static const struct drm_connector_helper_funcs sunxi_spi_connector_helper_funcs = {
++	.get_modes = sunxi_spi_get_modes,
++};
++
++static const struct drm_connector_funcs sunxi_spi_connector_funcs = {
++	.detect = sunxi_spi_detect,
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.destroy = drm_connector_cleanup,
++	.reset = drm_atomic_helper_connector_reset,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++
++static int sunxi_spi_bind(struct device *dev, struct device *master, void *data)
++{
++	struct sunxi_drm_spi *spi = dev_get_drvdata(dev);
++	struct drm_device *drm = data;
++	int ret;
++
++	spi->sdrm.drm_dev = drm;
++	drm_encoder_helper_add(&spi->sdrm.encoder,
++				      &sunxi_spi_encoder_helper_funcs);
++	ret = drm_simple_encoder_init(drm, &spi->sdrm.encoder,
++				      DRM_MODE_ENCODER_NONE);
++	if (ret)
++		return ret;
++
++	if (spi->tcon_node)
++		spi->sdrm.encoder.possible_crtcs =
++			drm_of_find_possible_crtcs(drm, spi->tcon_node);
++	else
++		spi->sdrm.encoder.possible_crtcs = ~0u;
++
++	drm_connector_helper_add(&spi->sdrm.connector,
++				 &sunxi_spi_connector_helper_funcs);
++	ret = drm_connector_init(drm, &spi->sdrm.connector,
++				 &sunxi_spi_connector_funcs, DRM_MODE_CONNECTOR_SPI);
++	if (ret) {
++		drm_encoder_cleanup(&spi->sdrm.encoder);
++		return ret;
++	}
++
++	spi->sdrm.connector.polled = 0;
++	drm_connector_attach_encoder(&spi->sdrm.connector, &spi->sdrm.encoder);
++	DRM_DEV_INFO(dev, "bound to sunxi DRM master: %ux%u@%uHz\n",
++			spi->mode.hdisplay, spi->mode.vdisplay,
++			drm_mode_vrefresh(&spi->mode));
++	return 0;
++}
++
++static void sunxi_spi_unbind(struct device *dev, struct device *master,
++				     void *data)
++{
++	struct sunxi_drm_spi *spi = dev_get_drvdata(dev);
++
++	drm_connector_cleanup(&spi->sdrm.connector);
++	drm_encoder_cleanup(&spi->sdrm.encoder);
++}
++
++static const struct component_ops sunxi_spi_component_ops = {
++	.bind = sunxi_spi_bind,
++	.unbind = sunxi_spi_unbind,
++};
++
++static int sunxi_spi_probe(struct platform_device *pdev)
++{
++	struct sunxi_drm_spi *spi;
++	struct device_node *np = pdev->dev.of_node;
++	struct device_node *tcon;
++	int ret;
++
++	spi = devm_kzalloc(&pdev->dev, sizeof(*spi), GFP_KERNEL);
++	if (!spi)
++		return -ENOMEM;
++	spi->dev = &pdev->dev;
++	mutex_init(&spi->flush_lock);
++	spi->sdrm.hw_id = 0;
++
++	spi->spi_node = of_parse_phandle(np, "spi", 0);
++	if (!spi->spi_node)
++		return dev_err_probe(&pdev->dev, -EINVAL, "missing spi phandle\n");
++	spi->spi = sunxi_spi_get_by_node(spi->spi_node);
++	if (!spi->spi) {
++		ret = dev_err_probe(&pdev->dev, -EPROBE_DEFER,
++				    "SPI device is not ready\n");
++		of_node_put(spi->spi_node);
++		return ret;
++	}
++
++	tcon = of_parse_phandle(np, "tcon", 0);
++	spi->tcon_node = tcon;
++	if (of_property_read_u32(np, "tcon-id", &spi->tcon_id))
++		spi->tcon_id = 0;
++
++	ret = sunxi_spi_parse_mode(spi);
++	if (ret)
++		goto put_spi;
++	ret = sunxi_spi_parse_init_sequence(spi);
++	if (ret)
++		goto put_spi;
++	ret = sunxi_spi_regulator_get(spi, &spi->power, "power");
++	if (ret)
++		goto put_spi;
++	ret = sunxi_spi_regulator_get(spi, &spi->io, "io");
++	if (ret)
++		goto put_spi;
++
++	spi->reset = devm_gpiod_get_optional(&pdev->dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(spi->reset)) {
++		ret = PTR_ERR(spi->reset);
++		goto put_spi;
++	}
++	spi->dc = devm_gpiod_get_optional(&pdev->dev, "dc", GPIOD_OUT_LOW);
++	if (IS_ERR(spi->dc)) {
++		ret = PTR_ERR(spi->dc);
++		goto put_spi;
++	}
++	spi->backlight = devm_of_find_backlight(&pdev->dev);
++	if (IS_ERR(spi->backlight)) {
++		ret = PTR_ERR(spi->backlight);
++		goto put_spi;
++	}
++
++	ret = mipi_dbi_spi_init(spi->spi, &spi->dbi, spi->dc);
++	if (ret)
++		goto put_spi;
++	spi->dbi.reset = spi->reset;
++	spi->tx_buf_len = spi->mode.hdisplay * spi->mode.vdisplay * sizeof(u16);
++	spi->tx_buf = devm_kmalloc(&pdev->dev, spi->tx_buf_len, GFP_KERNEL);
++	if (!spi->tx_buf) {
++		ret = -ENOMEM;
++		goto put_spi;
++	}
++
++	platform_set_drvdata(pdev, spi);
++	DRM_DEV_INFO(&pdev->dev,
++		     "probed SPI DBI output (%ux%u, %u Hz); SPI DMA is controller-dependent\n",
++		     spi->mode.hdisplay, spi->mode.vdisplay, spi->spi->max_speed_hz);
++	ret = component_add(&pdev->dev, &sunxi_spi_component_ops);
++	if (ret)
++		goto put_spi;
++	return 0;
++
++put_spi:
++	of_node_put(spi->tcon_node);
++	of_node_put(spi->spi_node);
++	put_device(&spi->spi->dev);
++	return ret;
++}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
++static int sunxi_spi_remove(struct platform_device *pdev)
++#else
++static void sunxi_spi_remove(struct platform_device *pdev)
++#endif
++{
++	struct sunxi_drm_spi *spi = platform_get_drvdata(pdev);
++
++	component_del(&pdev->dev, &sunxi_spi_component_ops);
++	if (spi) {
++		of_node_put(spi->tcon_node);
++		of_node_put(spi->spi_node);
++	}
++	if (spi && spi->spi)
++		put_device(&spi->spi->dev);
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
++	return 0;
++#endif
++}
++
++static const struct of_device_id sunxi_spi_match[] = {
++	{ .compatible = "allwinner,sunxi-drm-spi" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sunxi_spi_match);
++
++struct platform_driver sunxi_spi_platform_driver = {
++	.probe = sunxi_spi_probe,
++	.remove = sunxi_spi_remove,
++	.driver = {
++		.name = "sunxi-drm-spi",
++		.of_match_table = sunxi_spi_match,
++	},
++};
++
++MODULE_DESCRIPTION("Allwinner sunxi DRM SPI/DBI output");
++MODULE_LICENSE("GPL");
+diff --git a/user_mods/sunxi_drm_spi/sunxi_drm_spi.c b/user_mods/sunxi_drm_spi/sunxi_drm_spi.c
+new file mode 100644
+index 000000000000..701eaa6873e2
+--- /dev/null
++++ b/user_mods/sunxi_drm_spi/sunxi_drm_spi.c
+@@ -0,0 +1,649 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++/*
++ * Allwinner vendor DRM SPI/DBI output prototype.
++ *
++ * This driver deliberately lives in the sunxi DRM component graph.  It does
++ * not create a second DRM card or a fbdev device.  The sunxi DE remains the
++ * compositor; after the DE commit this driver copies the committed primary
++ * plane into a DMA-safe RGB565 buffer and sends it through MIPI DBI over SPI.
++ *
++ * The first version supports one primary plane and a full-frame update.  A
++ * later version should use the existing sunxi writeback connector when more
++ * than one plane is active, then send the writeback buffer over SPI.
++ */
++
++#include <linux/backlight.h>
++#include <linux/component.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of_device.h>
++#include <linux/platform_device.h>
++#include <linux/regulator/consumer.h>
++#include <linux/spi/spi.h>
++#include <linux/slab.h>
++#include <linux/version.h>
++
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_connector.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_mipi_dbi.h>
++#include <drm/drm_of.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_print.h>
++#include <drm/drm_simple_kms_helper.h>
++
++#include <video/mipi_display.h>
++
++#include "sunxi_drm_drv.h"
++#include "sunxi_drm_crtc.h"
++
++#define SUNXI_SPI_MAX_PLANES	4
++
++struct sunxi_drm_spi {
++	struct sunxi_drm_device sdrm;
++	struct device *dev;
++	struct spi_device *spi;
++	struct device_node *spi_node;
++	struct device_node *tcon_node;
++	struct mipi_dbi dbi;
++	struct drm_display_mode mode;
++	struct regulator *power;
++	struct regulator *io;
++	struct gpio_desc *reset;
++	struct gpio_desc *dc;
++	struct backlight_device *backlight;
++	u8 *init_sequence;
++	size_t init_sequence_len;
++	u16 *tx_buf;
++	size_t tx_buf_len;
++	u32 tcon_id;
++	bool prepared;
++	struct mutex flush_lock;
++};
++
++static inline struct sunxi_drm_spi *to_sunxi_drm_spi(struct sunxi_drm_device *sdrm)
++{
++	return container_of(sdrm, struct sunxi_drm_spi, sdrm);
++}
++
++static int sunxi_spi_find_device(struct device *dev, const void *data)
++{
++	return dev->of_node == data;
++}
++
++static struct spi_device *sunxi_spi_get_by_node(struct device_node *np)
++{
++	struct device *dev;
++
++	dev = bus_find_device(&spi_bus_type, NULL, np, sunxi_spi_find_device);
++	if (!dev)
++		return NULL;
++
++	return to_spi_device(dev);
++}
++
++static int sunxi_spi_parse_mode(struct sunxi_drm_spi *spi)
++{
++	int ret;
++
++	ret = of_get_drm_panel_display_mode(spi->dev->of_node, &spi->mode, NULL);
++	if (ret) {
++		DRM_DEV_ERROR(spi->dev, "failed to parse panel-timing: %d\n", ret);
++		return ret;
++	}
++
++	spi->mode.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	if (!spi->mode.clock)
++		spi->mode.clock = spi->mode.htotal * spi->mode.vtotal * 60 / 1000;
++
++	if (!spi->mode.hdisplay || !spi->mode.vdisplay) {
++		DRM_DEV_ERROR(spi->dev, "invalid SPI panel mode\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int sunxi_spi_parse_init_sequence(struct sunxi_drm_spi *spi)
++{
++	int count, ret;
++
++	count = of_property_count_elems_of_size(spi->dev->of_node,
++						"init-sequence", sizeof(u8));
++	if (count <= 0) {
++		DRM_DEV_INFO(spi->dev,
++			     "no init-sequence; panel must be preconfigured or use a panel-specific sequence\n");
++		return 0;
++	}
++
++	spi->init_sequence = devm_kmalloc(spi->dev, count, GFP_KERNEL);
++	if (!spi->init_sequence)
++		return -ENOMEM;
++
++	ret = of_property_read_u8_array(spi->dev->of_node, "init-sequence",
++					spi->init_sequence, count);
++	if (ret)
++		return ret;
++
++	spi->init_sequence_len = count;
++	return 0;
++}
++
++static int sunxi_spi_regulator_get(struct sunxi_drm_spi *spi,
++					struct regulator **reg, const char *name)
++{
++	int ret;
++
++	*reg = devm_regulator_get_optional(spi->dev, name);
++	if (IS_ERR(*reg)) {
++		ret = PTR_ERR(*reg);
++		if (ret == -ENODEV) {
++			*reg = NULL;
++			dev_warn(spi->dev, "optional %s supply is absent\n", name);
++			return 0;
++		}
++		return dev_err_probe(spi->dev, ret, "failed to get %s supply\n", name);
++	}
++
++	return 0;
++}
++
++static int sunxi_spi_prepare(struct sunxi_drm_spi *spi)
++{
++	int ret;
++
++	if (spi->prepared)
++		return 0;
++
++	if (spi->power) {
++		ret = regulator_enable(spi->power);
++		if (ret)
++			return ret;
++	}
++	if (spi->io) {
++		ret = regulator_enable(spi->io);
++		if (ret)
++			goto disable_power;
++	}
++
++	if (spi->reset) {
++		gpiod_set_value_cansleep(spi->reset, 1);
++		usleep_range(1000, 2000);
++		gpiod_set_value_cansleep(spi->reset, 0);
++		msleep(20);
++		gpiod_set_value_cansleep(spi->reset, 1);
++		msleep(120);
++	}
++
++	spi->prepared = true;
++	DRM_DEV_INFO(spi->dev, "prepared SPI DBI panel at %u Hz\n",
++			spi->spi->max_speed_hz);
++	return 0;
++
++disable_power:
++	if (spi->power)
++		regulator_disable(spi->power);
++	return ret;
++}
++
++static void sunxi_spi_unprepare(struct sunxi_drm_spi *spi)
++{
++	if (!spi->prepared)
++		return;
++
++	if (spi->io)
++		regulator_disable(spi->io);
++	if (spi->power)
++		regulator_disable(spi->power);
++	spi->prepared = false;
++}
++
++static int sunxi_spi_execute_init_sequence(struct sunxi_drm_spi *spi)
++{
++	size_t pos = 0;
++
++	while (pos < spi->init_sequence_len) {
++		u8 command, count;
++		int ret = 0;
++
++		if (spi->init_sequence_len - pos < 2)
++			return -EINVAL;
++		command = spi->init_sequence[pos++];
++		count = spi->init_sequence[pos++];
++		if (spi->init_sequence_len - pos < count)
++			return -EINVAL;
++
++		if (command == 0 && count == 1)
++			msleep(spi->init_sequence[pos]);
++		else if (count)
++			ret = mipi_dbi_command_stackbuf(&spi->dbi, command,
++						&spi->init_sequence[pos], count);
++		else
++			ret = mipi_dbi_command(&spi->dbi, command);
++
++		if (ret) {
++			DRM_DEV_ERROR(spi->dev, "init command 0x%02x failed: %d\n",
++				      command, ret);
++			return ret;
++		}
++		pos += count;
++	}
++
++	return 0;
++}
++
++static int sunxi_spi_set_window(struct sunxi_drm_spi *spi,
++				unsigned int width, unsigned int height)
++{
++	u8 column[] = { 0, 0, (width - 1) >> 8, (width - 1) & 0xff };
++	u8 page[] = { 0, 0, (height - 1) >> 8, (height - 1) & 0xff };
++	int ret;
++
++	ret = mipi_dbi_command_buf(&spi->dbi, MIPI_DCS_SET_COLUMN_ADDRESS,
++				   column, sizeof(column));
++	if (ret)
++		return ret;
++	return mipi_dbi_command_buf(&spi->dbi, MIPI_DCS_SET_PAGE_ADDRESS,
++				    page, sizeof(page));
++}
++
++static void sunxi_spi_copy_pixel(u16 *dst, u32 pixel, u32 format)
++{
++	u8 r, g, b;
++	u16 value;
++
++	if (format == DRM_FORMAT_RGB565) {
++		value = pixel & 0xffff;
++		*dst = cpu_to_be16(value);
++		return;
++	}
++
++	r = (pixel >> 16) & 0xff;
++	g = (pixel >> 8) & 0xff;
++	b = pixel & 0xff;
++	value = ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3);
++	*dst = cpu_to_be16(value);
++}
++
++static int sunxi_spi_copy_frame(struct sunxi_drm_spi *spi,
++				struct drm_framebuffer *fb,
++				struct iosys_map *src)
++{
++	unsigned int x, y;
++	unsigned int bpp;
++
++	if (fb->format->format != DRM_FORMAT_RGB565 &&
++	    fb->format->format != DRM_FORMAT_XRGB8888 &&
++	    fb->format->format != DRM_FORMAT_ARGB8888) {
++		DRM_DEV_ERROR_RATELIMITED(spi->dev,
++					  "unsupported framebuffer format %p4cc\n",
++					  &fb->format->format);
++		return -EINVAL;
++	}
++
++	bpp = fb->format->cpp[0];
++	for (y = 0; y < fb->height; y++) {
++		for (x = 0; x < fb->width; x++) {
++			u32 pixel;
++
++			if (bpp == 2)
++				pixel = iosys_map_rd(src, y * fb->pitches[0] + x * 2,
++							 u16);
++			else
++				pixel = iosys_map_rd(src, y * fb->pitches[0] + x * 4,
++							 u32);
++			sunxi_spi_copy_pixel(&spi->tx_buf[y * fb->width + x],
++					     pixel, fb->format->format);
++		}
++	}
++
++	return 0;
++}
++
++static struct drm_plane_state *sunxi_spi_find_primary_state(
++				struct drm_crtc_state *crtc_state)
++{
++	struct drm_plane *plane;
++	struct drm_plane_state *fallback = NULL;
++	unsigned int active_planes = 0;
++
++	drm_for_each_plane(plane, crtc_state->state->dev) {
++		struct drm_plane_state *state;
++
++		state = drm_atomic_get_new_plane_state(crtc_state->state, plane);
++		if (!state)
++			state = plane->state;
++		if (!state || state->crtc != crtc_state->crtc || !state->fb)
++			continue;
++		active_planes++;
++		if (plane->type == DRM_PLANE_TYPE_PRIMARY)
++			return state;
++		fallback = state;
++	}
++
++	if (active_planes > 1)
++		dev_warn_ratelimited(crtc_state->crtc->dev->dev,
++					 "SPI prototype only flushes one composed plane; overlays are not flattened\n");
++
++	return fallback;
++}
++
++static void sunxi_spi_atomic_flush_state(void *data,
++					 struct drm_crtc_state *crtc_state)
++{
++	struct sunxi_drm_spi *spi = data;
++	struct drm_plane_state *plane_state;
++	struct drm_framebuffer *fb;
++	struct iosys_map map[SUNXI_SPI_MAX_PLANES];
++	struct iosys_map data_map[SUNXI_SPI_MAX_PLANES];
++	int ret;
++
++	if (!crtc_state->active)
++		return;
++
++	plane_state = sunxi_spi_find_primary_state(crtc_state);
++	if (!plane_state) {
++		dev_warn_ratelimited(spi->dev,
++					 "no framebuffer in committed CRTC state\n");
++		return;
++	}
++	fb = plane_state->fb;
++	if (fb->width != spi->mode.hdisplay || fb->height != spi->mode.vdisplay ||
++	    fb->format->num_planes > SUNXI_SPI_MAX_PLANES ||
++	    (size_t)fb->width * fb->height * sizeof(u16) > spi->tx_buf_len) {
++		dev_warn_ratelimited(spi->dev,
++				     "rejecting framebuffer dimensions/planes unsuitable for SPI\n");
++		return;
++	}
++
++	mutex_lock(&spi->flush_lock);
++	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
++	if (ret)
++		goto out_unlock;
++
++	ret = drm_gem_fb_vmap(fb, map, data_map);
++	if (ret)
++		goto out_cpu;
++
++	ret = sunxi_spi_copy_frame(spi, fb, &data_map[0]);
++	if (!ret)
++		ret = sunxi_spi_set_window(spi, fb->width, fb->height);
++	if (!ret)
++		ret = mipi_dbi_command_buf(&spi->dbi, MIPI_DCS_WRITE_MEMORY_START,
++					   (u8 *)spi->tx_buf,
++					   fb->width * fb->height * sizeof(u16));
++
++	drm_gem_fb_vunmap(fb, map);
++out_cpu:
++	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
++out_unlock:
++	mutex_unlock(&spi->flush_lock);
++
++	if (ret)
++		DRM_DEV_ERROR_RATELIMITED(spi->dev, "frame flush failed: %d\n", ret);
++}
++
++static int sunxi_spi_encoder_atomic_check(struct drm_encoder *encoder,
++						struct drm_crtc_state *crtc_state,
++						struct drm_connector_state *conn_state)
++{
++	struct sunxi_drm_device *sdrm = container_of(encoder,
++							struct sunxi_drm_device, encoder);
++	struct sunxi_drm_spi *spi = to_sunxi_drm_spi(sdrm);
++	struct sunxi_crtc_state *scrtc_state = to_sunxi_crtc_state(crtc_state);
++
++	scrtc_state->tcon_id = spi->tcon_id;
++	scrtc_state->output_dev_data = spi;
++	scrtc_state->atomic_flush = NULL;
++	scrtc_state->atomic_flush_state = sunxi_spi_atomic_flush_state;
++	return 0;
++}
++
++static void sunxi_spi_encoder_atomic_enable(struct drm_encoder *encoder,
++						struct drm_atomic_state *state)
++{
++	struct sunxi_drm_device *sdrm = container_of(encoder,
++							struct sunxi_drm_device, encoder);
++	struct sunxi_drm_spi *spi = to_sunxi_drm_spi(sdrm);
++	int ret;
++
++	ret = sunxi_spi_prepare(spi);
++	if (ret) {
++		DRM_DEV_ERROR(spi->dev, "panel prepare failed: %d\n", ret);
++		return;
++	}
++	ret = sunxi_spi_execute_init_sequence(spi);
++	if (ret)
++		DRM_DEV_ERROR(spi->dev, "panel init sequence failed: %d\n", ret);
++	if (spi->backlight)
++		backlight_enable(spi->backlight);
++}
++
++static void sunxi_spi_encoder_atomic_disable(struct drm_encoder *encoder,
++						 struct drm_atomic_state *state)
++{
++	struct sunxi_drm_device *sdrm = container_of(encoder,
++							struct sunxi_drm_device, encoder);
++	struct sunxi_drm_spi *spi = to_sunxi_drm_spi(sdrm);
++
++	if (spi->backlight)
++		backlight_disable(spi->backlight);
++	mipi_dbi_command(&spi->dbi, MIPI_DCS_SET_DISPLAY_OFF);
++	mipi_dbi_command(&spi->dbi, MIPI_DCS_ENTER_SLEEP_MODE);
++	sunxi_spi_unprepare(spi);
++}
++
++static const struct drm_encoder_helper_funcs sunxi_spi_encoder_helper_funcs = {
++	.atomic_check = sunxi_spi_encoder_atomic_check,
++	.atomic_enable = sunxi_spi_encoder_atomic_enable,
++	.atomic_disable = sunxi_spi_encoder_atomic_disable,
++};
++
++static enum drm_connector_status sunxi_spi_detect(struct drm_connector *connector,
++						bool force)
++{
++	return connector_status_connected;
++}
++
++static int sunxi_spi_get_modes(struct drm_connector *connector)
++{
++	struct sunxi_drm_device *sdrm = container_of(connector,
++							struct sunxi_drm_device, connector);
++	struct sunxi_drm_spi *spi = to_sunxi_drm_spi(sdrm);
++	struct drm_display_mode *mode;
++
++	mode = drm_mode_duplicate(connector->dev, &spi->mode);
++	if (!mode)
++		return 0;
++	drm_mode_probed_add(connector, mode);
++	return 1;
++}
++
++static const struct drm_connector_helper_funcs sunxi_spi_connector_helper_funcs = {
++	.get_modes = sunxi_spi_get_modes,
++};
++
++static const struct drm_connector_funcs sunxi_spi_connector_funcs = {
++	.detect = sunxi_spi_detect,
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.destroy = drm_connector_cleanup,
++	.reset = drm_atomic_helper_connector_reset,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++
++static int sunxi_spi_bind(struct device *dev, struct device *master, void *data)
++{
++	struct sunxi_drm_spi *spi = dev_get_drvdata(dev);
++	struct drm_device *drm = data;
++	int ret;
++
++	spi->sdrm.drm_dev = drm;
++	drm_encoder_helper_add(&spi->sdrm.encoder,
++				      &sunxi_spi_encoder_helper_funcs);
++	ret = drm_simple_encoder_init(drm, &spi->sdrm.encoder,
++				      DRM_MODE_ENCODER_NONE);
++	if (ret)
++		return ret;
++
++	if (spi->tcon_node)
++		spi->sdrm.encoder.possible_crtcs =
++			drm_of_find_possible_crtcs(drm, spi->tcon_node);
++	else
++		spi->sdrm.encoder.possible_crtcs = ~0u;
++
++	drm_connector_helper_add(&spi->sdrm.connector,
++				 &sunxi_spi_connector_helper_funcs);
++	ret = drm_connector_init(drm, &spi->sdrm.connector,
++				 &sunxi_spi_connector_funcs, DRM_MODE_CONNECTOR_SPI);
++	if (ret) {
++		drm_encoder_cleanup(&spi->sdrm.encoder);
++		return ret;
++	}
++
++	spi->sdrm.connector.polled = 0;
++	drm_connector_attach_encoder(&spi->sdrm.connector, &spi->sdrm.encoder);
++	DRM_DEV_INFO(dev, "bound to sunxi DRM master: %ux%u@%uHz\n",
++			spi->mode.hdisplay, spi->mode.vdisplay,
++			drm_mode_vrefresh(&spi->mode));
++	return 0;
++}
++
++static void sunxi_spi_unbind(struct device *dev, struct device *master,
++				     void *data)
++{
++	struct sunxi_drm_spi *spi = dev_get_drvdata(dev);
++
++	drm_connector_cleanup(&spi->sdrm.connector);
++	drm_encoder_cleanup(&spi->sdrm.encoder);
++}
++
++static const struct component_ops sunxi_spi_component_ops = {
++	.bind = sunxi_spi_bind,
++	.unbind = sunxi_spi_unbind,
++};
++
++static int sunxi_spi_probe(struct platform_device *pdev)
++{
++	struct sunxi_drm_spi *spi;
++	struct device_node *np = pdev->dev.of_node;
++	struct device_node *tcon;
++	int ret;
++
++	spi = devm_kzalloc(&pdev->dev, sizeof(*spi), GFP_KERNEL);
++	if (!spi)
++		return -ENOMEM;
++	spi->dev = &pdev->dev;
++	mutex_init(&spi->flush_lock);
++	spi->sdrm.hw_id = 0;
++
++	spi->spi_node = of_parse_phandle(np, "spi", 0);
++	if (!spi->spi_node)
++		return dev_err_probe(&pdev->dev, -EINVAL, "missing spi phandle\n");
++	spi->spi = sunxi_spi_get_by_node(spi->spi_node);
++	if (!spi->spi) {
++		ret = dev_err_probe(&pdev->dev, -EPROBE_DEFER,
++				    "SPI device is not ready\n");
++		of_node_put(spi->spi_node);
++		return ret;
++	}
++
++	tcon = of_parse_phandle(np, "tcon", 0);
++	spi->tcon_node = tcon;
++	if (of_property_read_u32(np, "tcon-id", &spi->tcon_id))
++		spi->tcon_id = 0;
++
++	ret = sunxi_spi_parse_mode(spi);
++	if (ret)
++		goto put_spi;
++	ret = sunxi_spi_parse_init_sequence(spi);
++	if (ret)
++		goto put_spi;
++	ret = sunxi_spi_regulator_get(spi, &spi->power, "power");
++	if (ret)
++		goto put_spi;
++	ret = sunxi_spi_regulator_get(spi, &spi->io, "io");
++	if (ret)
++		goto put_spi;
++
++	spi->reset = devm_gpiod_get_optional(&pdev->dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(spi->reset)) {
++		ret = PTR_ERR(spi->reset);
++		goto put_spi;
++	}
++	spi->dc = devm_gpiod_get_optional(&pdev->dev, "dc", GPIOD_OUT_LOW);
++	if (IS_ERR(spi->dc)) {
++		ret = PTR_ERR(spi->dc);
++		goto put_spi;
++	}
++	spi->backlight = devm_of_find_backlight(&pdev->dev);
++	if (IS_ERR(spi->backlight)) {
++		ret = PTR_ERR(spi->backlight);
++		goto put_spi;
++	}
++
++	ret = mipi_dbi_spi_init(spi->spi, &spi->dbi, spi->dc);
++	if (ret)
++		goto put_spi;
++	spi->dbi.reset = spi->reset;
++	spi->tx_buf_len = spi->mode.hdisplay * spi->mode.vdisplay * sizeof(u16);
++	spi->tx_buf = devm_kmalloc(&pdev->dev, spi->tx_buf_len, GFP_KERNEL);
++	if (!spi->tx_buf) {
++		ret = -ENOMEM;
++		goto put_spi;
++	}
++
++	platform_set_drvdata(pdev, spi);
++	DRM_DEV_INFO(&pdev->dev,
++		     "probed SPI DBI output (%ux%u, %u Hz); SPI DMA is controller-dependent\n",
++		     spi->mode.hdisplay, spi->mode.vdisplay, spi->spi->max_speed_hz);
++	ret = component_add(&pdev->dev, &sunxi_spi_component_ops);
++	if (ret)
++		goto put_spi;
++	return 0;
++
++put_spi:
++	of_node_put(spi->tcon_node);
++	of_node_put(spi->spi_node);
++	put_device(&spi->spi->dev);
++	return ret;
++}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
++static int sunxi_spi_remove(struct platform_device *pdev)
++#else
++static void sunxi_spi_remove(struct platform_device *pdev)
++#endif
++{
++	struct sunxi_drm_spi *spi = platform_get_drvdata(pdev);
++
++	component_del(&pdev->dev, &sunxi_spi_component_ops);
++	if (spi) {
++		of_node_put(spi->tcon_node);
++		of_node_put(spi->spi_node);
++	}
++	if (spi && spi->spi)
++		put_device(&spi->spi->dev);
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
++	return 0;
++#endif
++}
++
++static const struct of_device_id sunxi_spi_match[] = {
++	{ .compatible = "allwinner,sunxi-drm-spi" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sunxi_spi_match);
++
++struct platform_driver sunxi_spi_platform_driver = {
++	.probe = sunxi_spi_probe,
++	.remove = sunxi_spi_remove,
++	.driver = {
++		.name = "sunxi-drm-spi",
++		.of_match_table = sunxi_spi_match,
++	},
++};
++
++MODULE_DESCRIPTION("Allwinner sunxi DRM SPI/DBI output");
++MODULE_LICENSE("GPL");
+diff --git a/user_mods/sunxi_drm_spi/Makefile b/user_mods/sunxi_drm_spi/Makefile
+new file mode 100644
+index 000000000000..016a6058cc77
+--- /dev/null
++++ b/user_mods/sunxi_drm_spi/Makefile
+@@ -0,0 +1,26 @@
++# External build helper for the sunxi DRM SPI output prototype.
++# HDMI remains the vendor BSP driver and is not built by this Makefile.
++#
++# This builds the object for compile/API validation. Functional integration
++# requires the matching BSP patch because the sunxi DRM master keeps its
++# component-driver list in sunxi_drm_drv.c.
++
++obj-m += sunxi_drm_spi.o
++
++KDIR ?= /lib/modules/$(shell uname -r)/build
++SUNXI_BSP ?= $(CURDIR)/../../bsp/drivers/drm
++
++ccflags-y += -I$(SUNXI_BSP)
++ccflags-y += -I$(SUNXI_BSP)/sunxi_device/hardware
++ccflags-y += -I$(SUNXI_BSP)/sunxi_device/hardware/lowlevel_de
++ccflags-y += -I$(SUNXI_BSP)/sunxi_device/hardware/lowlevel_lcd
++ccflags-y += -I$(SUNXI_BSP)/phy
++ccflags-y += -I$(SUNXI_BSP)/lib/inc
++ccflags-y += -I$(CURDIR)/../../bsp/drivers/video/sunxi
++ccflags-y += -I$(CURDIR)/../../bsp/include
++
++all:
++	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
++
++clean:
++	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
+diff --git a/user_mods/sunxi_drm_spi/README.md b/user_mods/sunxi_drm_spi/README.md
+new file mode 100644
+index 000000000000..8ef1f50f4d32
+--- /dev/null
++++ b/user_mods/sunxi_drm_spi/README.md
+@@ -0,0 +1,116 @@
++# sunxi DRM SPI/DBI output prototype
++
++This is an initial vendor-BSP integration for an SPI MIPI-DBI panel. It is
++intentionally different from upstream `panel-mipi-dbi`: it does not register a
++second DRM card or a second fbdev. The SPI output is a component of the vendor
++`sunxi-drm` master, so the Display Engine owns the KMS state and the PVR
++display path can continue to use the vendor framebuffer.
++
++The target board uses only the vendor HDMI output and this SPI output. The
++vendor `sunxi_drm_hdmi.c` is intentionally not copied or replaced here; HDMI
++continues to be built by the BSP's existing `CONFIG_AW_DRM_HDMI_TX` path. The
++integration patch only adds the SPI component and the common CRTC callback it
++needs, so it does not alter DSI/RGB/LVDS/EDP drivers.
++
++The current implementation is a bring-up prototype:
++
++- one SPI/DBI output component;
++- one fixed mode from `panel-timing`;
++- RGB565, XRGB8888 and ARGB8888 primary-plane input;
++- full-frame CPU conversion into a DMA-safe buffer;
++- MIPI DCS window setup and `WRITE_MEMORY_START` transfer;
++- controller DMA is requested through the normal SPI API (`spi_sync` inside
++  the kernel MIPI-DBI helper); whether the SoC SPI controller uses DMA depends
++  on its driver and transfer size;
++- no independent `panel-mipi-dbi` DRM card and no independent fbdev.
++
++The prototype intentionally does not claim full multi-plane composition. The
++first version takes the committed primary plane. A production version should
++use the existing sunxi writeback connector when overlays/cursor need to be
++flattened before SPI transfer, and should move the transfer to an asynchronous
++DMA worker with a page-flip fence.
++
++## BSP integration
++
++Apply `sunxi_drm_spi-bsp.patch` at the kernel tree root. Enable:
++
++```text
++CONFIG_AW_DRM=y
++CONFIG_AW_DRM_DE=y
++CONFIG_AW_DRM_TCON=y
++CONFIG_AW_DRM_SPI=y
++CONFIG_AW_DRM_HDMI_TX=y
++CONFIG_DRM_MIPI_DBI=y
++CONFIG_SPI=y
++```
++
++The standalone Makefile builds the SPI object for API/header validation. An
++external module alone cannot join the already-built `sunxi-drm` component
++master: the master's component match list is compiled into
++`sunxi_drm_drv.c`. Apply the BSP patch and rebuild the vendor DRM module (or
++the full kernel) for functional use. Do not build a second copy of the vendor
++HDMI driver as an external module; that would register duplicate HDMI
++platform-driver symbols.
++
++## Device-tree shape
++
++The SPI output platform node references an already-created SPI child and the
++TCON used to select a CRTC. The SPI child must not be bound by
++`panel-mipi-dbi` at the same time.
++
++```dts
++&spi3 {
++	status = "okay";
++	spi-max-frequency = <80000000>;
++
++	lcd_spi: display@0 {
++		reg = <0>;
++		compatible = "sunxi,spi-dbi-device";
++		spi-max-frequency = <80000000>;
++		spi-cpol;
++		spi-cpha;
++	};
++};
++
++sunxi_spi_lcd: sunxi-drm-spi {
++	compatible = "allwinner,sunxi-drm-spi";
++	spi = <&lcd_spi>;
++	tcon = <&tcon_lcd0>;
++	tcon-id = <0>;
++	reset-gpios = <&pio 0 0 GPIO_ACTIVE_LOW>;
++	dc-gpios = <&pio 0 1 GPIO_ACTIVE_HIGH>;
++	power-supply = <&reg_lcd_power>;
++	io-supply = <&reg_lcd_io>;
++
++	panel-timing {
++		clock-frequency = <9000000>;
++		hactive = <320>;
++		vactive = <240>;
++		hfront-porch = <10>;
++		hback-porch = <10>;
++		hsync-len = <10>;
++		vfront-porch = <10>;
++		vback-porch = <10>;
++		vsync-len = <10>;
++	};
++
++	/* command, parameter-count, parameters; 0x00/1 means delay (ms) */
++	init-sequence = /bits/ 8 <0x11 0x00 0x00 0x01 0x78 0x29 0x00>;
++};
++```
++
++The phandle names and GPIOs are examples only. Use the exact TCON node and
++regulators from the board DTS and the panel controller's real initialization
++sequence. Remove/disable the old `panel-mipi-dbi-spi` node before enabling this
++one, otherwise two drivers will compete for the same SPI device.
++
++## Debugging
++
++Useful messages are limited to probe/bind/enable failures and rate-limited
++flush/format failures:
++
++```sh
++dmesg -w | grep -E 'sunxi-drm-spi|SUNXI.*SPI|sunxi.*drm'
++cat /sys/class/drm/card*/name
++modetest -D /dev/dri/cardX -c -p
++```
+diff --git a/user_mods/sunxi_drm_spi/sun60i-a733-sunxi-drm-spi-example.dts b/user_mods/sunxi_drm_spi/sun60i-a733-sunxi-drm-spi-example.dts
+new file mode 100644
+index 000000000000..a2ca80c35876
+--- /dev/null
++++ b/user_mods/sunxi_drm_spi/sun60i-a733-sunxi-drm-spi-example.dts
+@@ -0,0 +1,46 @@
++/*
++ * Example fragment for the sunxi_drm_spi prototype.
++ *
++ * This is intentionally a template: replace GPIOs, regulators and the TCON
++ * phandle with the board's real nodes. Disable the old panel-mipi-dbi node
++ * before enabling this output so the SPI child has one owner.
++ */
++
++&spi3 {
++	status = "okay";
++	spi-max-frequency = <80000000>;
++
++	lcd_spi: display@0 {
++		reg = <0>;
++		compatible = "sunxi,spi-dbi-device";
++		spi-max-frequency = <80000000>;
++		spi-cpol;
++		spi-cpha;
++	};
++};
++
++sunxi_spi_lcd: sunxi-drm-spi {
++	compatible = "allwinner,sunxi-drm-spi";
++	spi = <&lcd_spi>;
++	tcon = <&tcon_lcd0>;
++	tcon-id = <0>;
++	reset-gpios = <&pio 0 0 GPIO_ACTIVE_LOW>;
++	dc-gpios = <&pio 0 1 GPIO_ACTIVE_HIGH>;
++	power-supply = <&reg_lcd_power>;
++	io-supply = <&reg_lcd_io>;
++
++	panel-timing {
++		clock-frequency = <9000000>;
++		hactive = <320>;
++		vactive = <240>;
++		hfront-porch = <10>;
++		hback-porch = <10>;
++		hsync-len = <10>;
++		vfront-porch = <10>;
++		vback-porch = <10>;
++		vsync-len = <10>;
++	};
++
++	/* command, parameter-count, parameters; 0x00/1 means delay (ms) */
++	init-sequence = /bits/ 8 <0x11 0x00 0x00 0x01 0x78 0x29 0x00>;
++};

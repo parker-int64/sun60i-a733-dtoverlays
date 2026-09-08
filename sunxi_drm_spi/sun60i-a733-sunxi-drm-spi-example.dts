@@ -1,0 +1,46 @@
+/*
+ * Example fragment for the sunxi_drm_spi prototype.
+ *
+ * This is intentionally a template: replace GPIOs, regulators and the TCON
+ * phandle with the board's real nodes. Disable the old panel-mipi-dbi node
+ * before enabling this output so the SPI child has one owner.
+ */
+
+&spi3 {
+	status = "okay";
+	spi-max-frequency = <80000000>;
+
+	lcd_spi: display@0 {
+		reg = <0>;
+		compatible = "sunxi,spi-dbi-device";
+		spi-max-frequency = <80000000>;
+		spi-cpol;
+		spi-cpha;
+	};
+};
+
+sunxi_spi_lcd: sunxi-drm-spi {
+	compatible = "allwinner,sunxi-drm-spi";
+	spi = <&lcd_spi>;
+	tcon = <&tcon_lcd0>;
+	tcon-id = <0>;
+	reset-gpios = <&pio 0 0 GPIO_ACTIVE_LOW>;
+	dc-gpios = <&pio 0 1 GPIO_ACTIVE_HIGH>;
+	power-supply = <&reg_lcd_power>;
+	io-supply = <&reg_lcd_io>;
+
+	panel-timing {
+		clock-frequency = <9000000>;
+		hactive = <320>;
+		vactive = <240>;
+		hfront-porch = <10>;
+		hback-porch = <10>;
+		hsync-len = <10>;
+		vfront-porch = <10>;
+		vback-porch = <10>;
+		vsync-len = <10>;
+	};
+
+	/* command, parameter-count, parameters; 0x00/1 means delay (ms) */
+	init-sequence = /bits/ 8 <0x11 0x00 0x00 0x01 0x78 0x29 0x00>;
+};
